@@ -150,7 +150,7 @@ class TestDepreciationCalculator(unittest.TestCase):
             with StringIO() as output:
                 assets_writer = DictWriter(output, fieldnames=fieldnames)
                 assets_writer.writeheader()
-                calculate_depreciation(asset, assets_writer)
+                calculate_depreciation(asset, assets_writer.writerow)
                 output_value = output.getvalue()
             with self.subTest():
                 self.assertEqual(

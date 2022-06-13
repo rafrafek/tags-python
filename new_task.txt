@@ -1,0 +1,4 @@
+Add support in solution for using SQLite as database.
+Single database file (data.sqlite).
+Instead of overwriting output, update row.
+Add method (CLI) to look up by asset ID from output.

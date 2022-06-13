@@ -27,6 +27,103 @@ from csv import DictReader, DictWriter
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
+from sqlite3 import connect
+from typing import Any, Callable, Mapping
+
+
+class SQLiteWriter:
+    def __init__(self, file_path: Path):
+        self.connection = connect(file_path)
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS assets("
+            "  id INTEGER PRIMARY KEY,"
+            "  name TEXT NOT NULL,"
+            "  UNIQUE (name)"
+            ")"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS rows("
+            "  id INTEGER PRIMARY KEY,"
+            "  asset_id INTEGER NOT NULL,"
+            "  month TEXT NOT NULL,"
+            "  amount TEXT NOT NULL,"
+            "  FOREIGN KEY (asset_id)"
+            "    REFERENCES assets (id)"
+            "      ON UPDATE NO ACTION"
+            "      ON DELETE CASCADE,"
+            "  UNIQUE (asset_id, month)"
+            ")"
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.connection.close()
+
+    def create_asset_if_not_exists(self, asset_id: str):
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT id, name FROM assets WHERE name=?", (asset_id,))
+        if cursor.fetchone() is None:
+            cursor.execute("INSERT INTO assets(name) VALUES(?)", (asset_id,))
+            self.connection.commit()
+
+    def update_or_create_row(self, row: Mapping[str, Any]):
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT id, name FROM assets WHERE name=?", (row["asset_id"],))
+        asset = cursor.fetchone()
+        if asset is None:
+            raise Exception(f"Asset {row['asset_id']} does not exist")
+        asset_id, _ = asset
+        cursor.execute(
+            "SELECT asset_id, month, amount FROM rows WHERE asset_id=? AND month=?",
+            (asset_id, row["month"]),
+        )
+        fetched = cursor.fetchone()
+        if fetched is None:
+            cursor.execute(
+                "INSERT INTO rows(asset_id, month, amount) VALUES(?, ?, ?)",
+                (asset_id, row["month"], str(row["amount"])),
+            )
+            self.connection.commit()
+            return
+        _, _, amount = fetched
+        if amount == str(row["amount"]):
+            return
+        cursor.execute(
+            "UPDATE rows SET amount=? WHERE asset_id=? AND month=?",
+            (str(row["amount"]), asset_id, row["month"]),
+        )
+        self.connection.commit()
+
+
+class SQLiteReader:
+    def __init__(self, file_path: Path, asset_name: str):
+        if asset_name is None:
+            print("Please specify asset ID with -a parameter")
+            return ()
+        self.connection = connect(file_path)
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT id, name FROM assets WHERE name=?", (asset_name,))
+        asset = cursor.fetchone()
+        if asset is None:
+            print(f"Asset {asset_name} does not exist")
+            return ()
+        asset_id, _ = asset
+        cursor.execute(
+            "SELECT asset_id, month, amount FROM rows WHERE asset_id=?",
+            (asset_id,),
+        )
+        for row in cursor:
+            _, month, amount = row
+            print(asset_name, month, amount)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.connection.close()
 
 
 class AssetItem:
@@ -52,7 +149,7 @@ def parse_args():
     parser.add_argument(
         "input_file",
         type=Path,
-        help="Path to assets CSV file.",
+        help="Path to assets CSV file or SQLite file for lookup.",
     )
     parser.add_argument(
         "-o",
@@ -61,33 +158,81 @@ def parse_args():
         help="Path to output file.",
         default="line_items.csv",
     )
+    parser.add_argument(
+        "-a",
+        "--asset_id",
+        type=str,
+        help="Look up for given asset ID in input file",
+        default=None,
+    )
     args = parser.parse_args()
     return args
 
 
 def main() -> None:
     args = parse_args()
+    if is_sqlite(args.input_file):
+        lookup(args.input_file, args.asset_id)
+    elif is_sqlite(args.output_file):
+        use_sqlite(args.input_file, args.output_file)
+    else:
+        use_csv(args.input_file, args.output_file)
+
+
+def is_sqlite(file_name: Path):
+    return file_name.suffix in (".sqlite", ".sqlite3")
+
+
+def lookup(input_file: Path, asset_id: str):
+    with SQLiteReader(input_file, asset_id):
+        pass
+
+
+def use_sqlite(input_file: Path, output_file: Path):
     input_ = {
-        "file": args.input_file,
+        "file": input_file,
+        "newline": "",
+    }
+    with (
+        open(**input_) as input_file_,
+        SQLiteWriter(output_file) as sql_writer,
+    ):
+        assets_reader = DictReader(input_file_)
+        for row_dict in assets_reader:
+            asset = AssetItem(**row_dict)
+            sql_writer.create_asset_if_not_exists(asset.asset_id)
+            write_row = sql_writer.update_or_create_row
+            calculate_depreciation(asset, write_row)
+
+
+def use_csv(input_file: Path, output_file: Path):
+    input_ = {
+        "file": input_file,
         "newline": "",
     }
     output_ = {
-        "file": args.output_file,
+        "file": output_file,
         "mode": "w",
         "newline": "",
     }
-    with open(**input_) as input_file, open(**output_) as output_file:
-        assets_reader = DictReader(input_file)
+    with (
+        open(**input_) as input_file_,
+        open(**output_) as output_file_,
+    ):
+        assets_reader = DictReader(input_file_)
         assets_writer = DictWriter(
-            output_file, fieldnames=("asset_id", "month", "amount")
+            output_file_, fieldnames=("asset_id", "month", "amount")
         )
         assets_writer.writeheader()
         for row_dict in assets_reader:
             asset = AssetItem(**row_dict)
-            calculate_depreciation(asset, assets_writer)
+            write_row = assets_writer.writerow
+            calculate_depreciation(asset, write_row)
 
 
-def calculate_depreciation(asset: AssetItem, assets_writer: DictWriter[str]):
+def calculate_depreciation(
+    asset: AssetItem, write_row: Callable[[Mapping[str, Any]], Any]
+):
     cents = Decimal("0.01")
     total_loss = asset.original_value - asset.salvage_value
     monthly_loss = total_loss / Decimal(asset.expected_life)
@@ -105,7 +250,7 @@ def calculate_depreciation(asset: AssetItem, assets_writer: DictWriter[str]):
         "month": f"{purchase_date.year}-{purchase_date.month:02d}",
         "amount": fm_loss,
     }
-    assets_writer.writerow(fm_row)
+    write_row(fm_row)
 
     # Calculate middle months
     end_date = calculate_end_date(purchase_date, asset.expected_life)
@@ -121,7 +266,7 @@ def calculate_depreciation(asset: AssetItem, assets_writer: DictWriter[str]):
             "month": f"{year}-{month:02d}",
             "amount": monthly_loss,
         }
-        assets_writer.writerow(row)
+        write_row(row)
         i += 1
         sum_middle += monthly_loss
 
@@ -132,7 +277,7 @@ def calculate_depreciation(asset: AssetItem, assets_writer: DictWriter[str]):
         "month": f"{end_date.year}-{end_date.month:02d}",
         "amount": lm_loss,
     }
-    assets_writer.writerow(lm_row)
+    write_row(lm_row)
 
 
 def calculate_end_date(purchase_date: date, expected_life: int) -> date:
