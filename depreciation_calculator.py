@@ -36,24 +36,24 @@ class SQLiteWriter:
         self.connection = connect(file_path)
         cursor = self.connection.cursor()
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS assets("
-            "  id INTEGER PRIMARY KEY,"
-            "  name TEXT NOT NULL,"
-            "  UNIQUE (name)"
-            ")"
+            """CREATE TABLE IF NOT EXISTS assets(
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL,
+              UNIQUE (name)
+            )"""
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS rows("
-            "  id INTEGER PRIMARY KEY,"
-            "  asset_id INTEGER NOT NULL,"
-            "  month TEXT NOT NULL,"
-            "  amount TEXT NOT NULL,"
-            "  FOREIGN KEY (asset_id)"
-            "    REFERENCES assets (id)"
-            "      ON UPDATE NO ACTION"
-            "      ON DELETE CASCADE,"
-            "  UNIQUE (asset_id, month)"
-            ")"
+            """CREATE TABLE IF NOT EXISTS rows(
+              id INTEGER PRIMARY KEY,
+              asset_id INTEGER NOT NULL,
+              month TEXT NOT NULL,
+              amount TEXT NOT NULL,
+              FOREIGN KEY (asset_id)
+                REFERENCES assets (id)
+                  ON UPDATE NO ACTION
+                  ON DELETE CASCADE,
+              UNIQUE (asset_id, month)
+            )"""
         )
 
     def __enter__(self):
@@ -98,34 +98,6 @@ class SQLiteWriter:
         self.connection.commit()
 
 
-class SQLiteReader:
-    def __init__(self, file_path: Path, asset_name: str):
-        if asset_name is None:
-            print("Please specify asset ID with -a parameter")
-            return ()
-        self.connection = connect(file_path)
-        cursor = self.connection.cursor()
-        cursor.execute("SELECT id, name FROM assets WHERE name=?", (asset_name,))
-        asset = cursor.fetchone()
-        if asset is None:
-            print(f"Asset {asset_name} does not exist")
-            return ()
-        asset_id, _ = asset
-        cursor.execute(
-            "SELECT asset_id, month, amount FROM rows WHERE asset_id=?",
-            (asset_id,),
-        )
-        for row in cursor:
-            _, month, amount = row
-            print(asset_name, month, amount)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self.connection.close()
-
-
 class AssetItem:
     def __init__(
         self,
@@ -149,7 +121,7 @@ def parse_args():
     parser.add_argument(
         "input_file",
         type=Path,
-        help="Path to assets CSV file or SQLite file for lookup.",
+        help="Path to assets CSV file.",
     )
     parser.add_argument(
         "-o",
@@ -158,22 +130,13 @@ def parse_args():
         help="Path to output file.",
         default="line_items.csv",
     )
-    parser.add_argument(
-        "-a",
-        "--asset_id",
-        type=str,
-        help="Look up for given asset ID in input file",
-        default=None,
-    )
     args = parser.parse_args()
     return args
 
 
 def main() -> None:
     args = parse_args()
-    if is_sqlite(args.input_file):
-        lookup(args.input_file, args.asset_id)
-    elif is_sqlite(args.output_file):
+    if is_sqlite(args.output_file):
         use_sqlite(args.input_file, args.output_file)
     else:
         use_csv(args.input_file, args.output_file)
@@ -181,11 +144,6 @@ def main() -> None:
 
 def is_sqlite(file_name: Path):
     return file_name.suffix in (".sqlite", ".sqlite3")
-
-
-def lookup(input_file: Path, asset_id: str):
-    with SQLiteReader(input_file, asset_id):
-        pass
 
 
 def use_sqlite(input_file: Path, output_file: Path):
